@@ -52,6 +52,18 @@ fn render_class_body(
         }
     }
 
+    // NOTE: anonymous / inner-class inlining is intentionally deferred — it
+    // requires cross-class context (the enclosing method + captured locals)
+    // that is not available in this per-class rendering pass.
+
+    // Class annotations (user-facing only).
+    render_annotations(dex, &class.class_annotations, "", imports, &mut out);
+
+    // Generics from the dalvik.annotation.Signature, if any and parseable.
+    let generics = dex
+        .class_signature(class)
+        .and_then(|sig| parse_class_header(&sig, imports));
+
     let modifiers = access::modifiers(class.access_flags, AccessKind::Class);
     let keyword = access::class_keyword(class.access_flags);
     if !modifiers.is_empty() {
@@ -59,28 +71,47 @@ fn render_class_body(
         out.push(' ');
     }
     out.push_str(&format!("{keyword} {simple}"));
+    if let Some(g) = &generics {
+        out.push_str(&g.type_params);
+    }
 
-    if let Some(sup) = dex.superclass_name(class) {
-        if sup != "java.lang.Object" && !access::is_interface(class.access_flags) {
-            out.push_str(&format!(" extends {}", imports.use_type(&sup)));
+    // extends clause: prefer the generic superclass when available.
+    if !access::is_interface(class.access_flags) {
+        if let Some(g) = &generics {
+            if let Some(sup) = &g.superclass {
+                if sup != "java.lang.Object" && sup != "Object" {
+                    out.push_str(&format!(" extends {sup}"));
+                }
+            }
+        } else if let Some(sup) = dex.superclass_name(class) {
+            if sup != "java.lang.Object" {
+                out.push_str(&format!(" extends {}", imports.use_type(&sup)));
+            }
         }
     }
-    let ifaces = dex.interface_names(class);
-    if !ifaces.is_empty() {
+
+    // implements / interface-extends clause.
+    let iface_names: Vec<String> = match &generics {
+        Some(g) if !g.interfaces.is_empty() => g.interfaces.clone(),
+        _ => {
+            let ifaces = dex.interface_names(class);
+            ifaces.iter().map(|i| imports.use_type(i)).collect()
+        }
+    };
+    if !iface_names.is_empty() {
         let kw = if access::is_interface(class.access_flags) {
             "extends"
         } else {
             "implements"
         };
-        let names: Vec<String> = ifaces.iter().map(|i| imports.use_type(i)).collect();
-        out.push_str(&format!(" {kw} {}", names.join(", ")));
+        out.push_str(&format!(" {kw} {}", iface_names.join(", ")));
     }
     out.push_str(" {\n");
 
     // Fields.
     let mut field_lines = Vec::new();
     for f in class.static_fields.iter().chain(class.instance_fields.iter()) {
-        field_lines.push(render_field(dex, f, imports));
+        field_lines.push(render_field(dex, class, f, imports));
     }
     for line in &field_lines {
         out.push_str(line);
@@ -104,11 +135,19 @@ fn render_class_body(
     out
 }
 
-fn render_field(dex: &DexFile, f: &DexFieldEntry, imports: &mut Imports) -> String {
+fn render_field(dex: &DexFile, class: &DexClass, f: &DexFieldEntry, imports: &mut Imports) -> String {
     let fref = dex.field_entry_ref(f);
     let modifiers = access::modifiers(f.access_flags, AccessKind::Field);
-    let ty = imports.use_type(&fref.field_type);
-    let mut line = String::from(INDENT);
+    // Prefer the generic field type from the Signature annotation when present.
+    let ty = dex
+        .field_signature(class, f.field_idx)
+        .and_then(|sig| parse_field_type(&sig, imports))
+        .unwrap_or_else(|| imports.use_type(&fref.field_type));
+    let mut line = String::new();
+    if let Some(anns) = class.field_annotations.get(&f.field_idx) {
+        render_annotations(dex, anns, INDENT, imports, &mut line);
+    }
+    line.push_str(INDENT);
     if !modifiers.is_empty() {
         line.push_str(&modifiers);
         line.push(' ');
@@ -129,24 +168,59 @@ fn render_method(
     let is_static = access::is_static(m.access_flags);
     let is_ctor = is_init_method(&mref.name);
 
+    // Generics from the dalvik.annotation.Signature, if present and parseable.
+    let generics = dex
+        .method_signature(class, m.method_idx)
+        .and_then(|sig| parse_method_generics(&sig, imports));
+
     // Parameter registers (only known precisely with a code item).
     let (this_reg, param_regs) = match &m.code {
         Some(code) => compute_param_regs(&mref, code.registers_size, code.ins_size, is_static),
         None => (None, infer_param_regs_no_code(&mref, is_static)),
     };
 
+    // Use generic parameter types positionally when the count matches the
+    // erased parameter list; otherwise keep the erased types.
+    let use_generic_params = generics
+        .as_ref()
+        .map(|g| g.params.len() == param_regs.len())
+        .unwrap_or(false);
     let param_list: Vec<String> = param_regs
         .iter()
-        .map(|(reg, ty)| format!("{} {}", imports.use_type(ty), reg_name(is_static, this_reg, *reg)))
+        .enumerate()
+        .map(|(i, (reg, ty))| {
+            let rendered = if use_generic_params {
+                generics.as_ref().unwrap().params[i].clone()
+            } else {
+                imports.use_type(ty)
+            };
+            format!("{} {}", rendered, reg_name(is_static, this_reg, *reg))
+        })
         .collect();
 
-    let mut sig = String::from(INDENT);
+    // Method-level annotations.
+    let mut sig = String::new();
+    if let Some(anns) = class.method_annotations.get(&m.method_idx) {
+        render_annotations(dex, anns, INDENT, imports, &mut sig);
+    }
+    sig.push_str(INDENT);
     if !modifiers.is_empty() {
         sig.push_str(&modifiers);
         sig.push(' ');
     }
+    // Method type-parameter list (`<T> ...`) for generic methods.
+    if let Some(g) = &generics {
+        if !g.type_params.is_empty() {
+            sig.push_str(&g.type_params);
+            sig.push(' ');
+        }
+    }
     if !is_ctor {
-        sig.push_str(&format!("{} ", imports.use_type(&mref.return_type)));
+        let ret = match &generics {
+            Some(g) => g.return_type.clone(),
+            None => imports.use_type(&mref.return_type),
+        };
+        sig.push_str(&format!("{ret} "));
     }
     let display_name = if mref.name == "<init>" {
         jadx_dex::descriptor::simple_name(&dex.class_name(class))
@@ -238,20 +312,9 @@ fn render_method_body(
     collect_region_blocks(&ir.region, &mut emitted);
     ctx.render_region(&ir.region, 2, imports, &mut region_lines);
 
-    // Leftover (handler / unstructured) blocks.
-    let mut leftover_lines: Vec<String> = Vec::new();
+    // Leftover (handler / unstructured) blocks, sorted by code offset.
     let mut leftover_ids: Vec<usize> = (0..ir.cfg.len()).filter(|id| !emitted.contains(id)).collect();
     leftover_ids.sort_by_key(|&id| ir.cfg.block(id).start_off);
-    for id in &leftover_ids {
-        leftover_lines.push(format!(
-            "{}// block_{id} @ 0x{:x}\n",
-            INDENT.repeat(3),
-            ir.cfg.block(*id).start_off
-        ));
-        for s in ctx.block_statements(ir.cfg.block(*id), imports) {
-            leftover_lines.push(format!("{}{}\n", INDENT.repeat(3), s));
-        }
-    }
 
     let mut out = String::new();
     for d in &decls {
@@ -260,26 +323,90 @@ fn render_method_body(
 
     let has_handlers = !ir.try_regions.is_empty() && !leftover_ids.is_empty();
     if has_handlers {
+        // Resolve catch branches to (Option<type-name>, handler_off), preserving
+        // declaration order and de-duplicating identical branches. A `None`
+        // type_idx is a catch-all (`finally`/`Throwable`).
+        let mut catch_specs: Vec<(Option<String>, u32)> = Vec::new();
+        let mut seen: HashSet<(Option<u32>, u32)> = HashSet::new();
+        for tr in &ir.try_regions {
+            for cb in &tr.catches {
+                let key = (cb.type_idx, cb.handler_off);
+                if !seen.insert(key) {
+                    continue;
+                }
+                let ty = cb.type_idx.map(|idx| ctx.dex.type_name(idx));
+                catch_specs.push((ty, cb.handler_off));
+            }
+        }
+
+        // Assign each leftover block to the catch whose handler_off matches its
+        // start offset; blocks that don't match any handler entry are emitted in
+        // a trailing catch-all so no decompiled code is silently dropped.
+        let handler_offs: HashSet<u32> = catch_specs.iter().map(|(_, off)| *off).collect();
+        let mut by_handler: HashMap<u32, Vec<usize>> = HashMap::new();
+        let mut unassigned: Vec<usize> = Vec::new();
+        for &id in &leftover_ids {
+            let off = ir.cfg.block(id).start_off;
+            if handler_offs.contains(&off) {
+                by_handler.entry(off).or_default().push(id);
+            } else {
+                unassigned.push(id);
+            }
+        }
+
         out.push_str(&format!("{}try {{\n", INDENT.repeat(2)));
         for l in &region_lines {
             out.push_str(&indent_line(l));
         }
-        out.push_str(&format!("{}}} catch (Throwable th) {{\n", INDENT.repeat(2)));
-        for l in &leftover_lines {
-            out.push_str(&indent_line(l));
+
+        // Pick exactly one clause to receive any blocks not tied to a specific
+        // handler entry: the (first) catch-all if present, else the last clause.
+        let has_catch_all = catch_specs.iter().any(|(ty, _)| ty.is_none());
+        let dump_idx = if has_catch_all {
+            catch_specs.iter().position(|(ty, _)| ty.is_none())
+        } else {
+            catch_specs.len().checked_sub(1)
+        };
+        let mut exc_n = 0usize;
+        for (idx, (ty, off)) in catch_specs.iter().enumerate() {
+            // Build the catch header. Catch-all -> Throwable.
+            let decl = match ty {
+                Some(t) => {
+                    let var = format!("e{exc_n}");
+                    exc_n += 1;
+                    format!("{} {var}", imports.use_type(t))
+                }
+                None => "Throwable th".to_string(),
+            };
+            out.push_str(&format!("{}}} catch ({decl}) {{\n", INDENT.repeat(2)));
+            let assigned: Vec<usize> = by_handler.get(off).cloned().unwrap_or_default();
+            for id in assigned {
+                for l in ctx.leftover_block_lines(id, imports) {
+                    out.push_str(&indent_line(&l));
+                }
+            }
+            if Some(idx) == dump_idx {
+                for &id in &unassigned {
+                    for l in ctx.leftover_block_lines(id, imports) {
+                        out.push_str(&indent_line(&l));
+                    }
+                }
+            }
         }
         out.push_str(&format!("{}}}\n", INDENT.repeat(2)));
     } else {
         for l in &region_lines {
             out.push_str(l);
         }
-        if !leftover_lines.is_empty() {
+        if !leftover_ids.is_empty() {
             out.push_str(&format!(
                 "{}/* jadx: unstructured blocks */\n",
                 INDENT.repeat(2)
             ));
-            for l in &leftover_lines {
-                out.push_str(l);
+            for &id in &leftover_ids {
+                for l in ctx.leftover_block_lines(id, imports) {
+                    out.push_str(&l);
+                }
             }
         }
     }
@@ -388,6 +515,21 @@ impl<'a> MethodCtx<'a> {
         }
         self.render_region(&case.body, depth + 1, imports, out);
         out.push(format!("{}break;\n", INDENT.repeat(depth + 1)));
+    }
+
+    /// Render a leftover (handler / unstructured) block's statements at handler
+    /// indent, prefixed with a provenance comment.
+    fn leftover_block_lines(&mut self, id: usize, imports: &mut Imports) -> Vec<String> {
+        let block = self.cfg.block(id);
+        let mut lines = vec![format!(
+            "{}// block_{id} @ 0x{:x}\n",
+            INDENT.repeat(3),
+            block.start_off
+        )];
+        for s in self.block_statements(block, imports) {
+            lines.push(format!("{}{}\n", INDENT.repeat(3), s));
+        }
+        lines
     }
 
     /// Emit a block's statements, skipping the trailing structuring terminator.
@@ -949,4 +1091,412 @@ fn escape_string(s: &str) -> String {
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Annotation emission.
+// ---------------------------------------------------------------------------
+
+/// Render the user annotations in `anns` as source lines at `pad`, one per line
+/// (system / synthetic annotations are filtered out). Types are routed through
+/// the imports manager so `@Foo` resolves correctly.
+fn render_annotations(
+    dex: &DexFile,
+    anns: &[jadx_dex::annotation::Annotation],
+    pad: &str,
+    imports: &mut Imports,
+    out: &mut String,
+) {
+    for ann in dex.user_annotations(anns) {
+        let ty = imports.use_type(&ann.type_name);
+        out.push_str(pad);
+        out.push('@');
+        out.push_str(&ty);
+        if !ann.elements.is_empty() {
+            out.push('(');
+            // A single element named "value" is rendered without the name=.
+            if ann.elements.len() == 1 && ann.elements[0].0 == "value" {
+                out.push_str(&ann.elements[0].1.to_string());
+            } else {
+                let parts: Vec<String> = ann
+                    .elements
+                    .iter()
+                    .map(|(name, val)| format!("{name} = {val}"))
+                    .collect();
+                out.push_str(&parts.join(", "));
+            }
+            out.push(')');
+        }
+        out.push('\n');
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Generics: JLS signature-grammar parser + Java rendering.
+//
+// Parses the `dalvik.annotation.Signature` payload (a JVM generic signature)
+// and re-renders type arguments, type parameters, and wildcards. Any parse
+// failure returns `None`, and callers fall back to the erased rendering — the
+// parser never panics and never produces partial garbage.
+// ---------------------------------------------------------------------------
+
+/// A formal type parameter: `T extends Bound & Bound2`.
+struct TypeParam {
+    name: String,
+    bounds: Vec<JType>,
+}
+
+/// A parsed (possibly generic) JVM type from a signature.
+enum JType {
+    /// Primitive or `void` (single descriptor char).
+    Prim(String),
+    /// A class type, dotted, with optional type arguments and `$`-inner chains.
+    Class { name: String, args: Vec<TypeArg> },
+    /// A type variable (`T`).
+    Var(String),
+    /// An array of the inner type.
+    Array(Box<JType>),
+}
+
+/// A type argument inside `<...>`.
+enum TypeArg {
+    Type(JType),
+    ExtendsWild(JType),
+    SuperWild(JType),
+    Unbounded, // `*` -> `?`
+}
+
+struct SigParser<'a> {
+    b: &'a [u8],
+    i: usize,
+}
+
+impl<'a> SigParser<'a> {
+    fn new(s: &'a str) -> Self {
+        SigParser {
+            b: s.as_bytes(),
+            i: 0,
+        }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.b.get(self.i).copied()
+    }
+
+    fn bump(&mut self) -> Option<u8> {
+        let c = self.b.get(self.i).copied();
+        if c.is_some() {
+            self.i += 1;
+        }
+        c
+    }
+
+    fn eat(&mut self, c: u8) -> Result<(), ()> {
+        if self.peek() == Some(c) {
+            self.i += 1;
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+
+    /// `<` FormalTypeParameter+ `>` (optional).
+    fn formal_type_params(&mut self) -> Result<Vec<TypeParam>, ()> {
+        if self.peek() != Some(b'<') {
+            return Ok(Vec::new());
+        }
+        self.bump();
+        let mut params = Vec::new();
+        while self.peek() != Some(b'>') {
+            if self.peek().is_none() {
+                return Err(());
+            }
+            params.push(self.formal_type_param()?);
+        }
+        self.eat(b'>')?;
+        Ok(params)
+    }
+
+    fn formal_type_param(&mut self) -> Result<TypeParam, ()> {
+        // Identifier up to ':'.
+        let start = self.i;
+        while let Some(c) = self.peek() {
+            if c == b':' {
+                break;
+            }
+            self.i += 1;
+        }
+        if self.i == start || self.peek() != Some(b':') {
+            return Err(());
+        }
+        let name = std::str::from_utf8(&self.b[start..self.i])
+            .map_err(|_| ())?
+            .to_string();
+        let mut bounds = Vec::new();
+        // First `:` is the class bound (may be empty: `T:` then interface bounds).
+        self.eat(b':')?;
+        if self.peek() != Some(b':') && self.peek() != Some(b'>') && self.peek().is_some() {
+            // A class bound is present unless immediately another ':'.
+            if matches!(self.peek(), Some(b'L') | Some(b'T') | Some(b'[')) {
+                bounds.push(self.field_type()?);
+            }
+        }
+        // Interface bounds: each prefixed with ':'.
+        while self.peek() == Some(b':') {
+            self.bump();
+            bounds.push(self.field_type()?);
+        }
+        Ok(TypeParam { name, bounds })
+    }
+
+    /// A `TypeSignature` used for fields, args, type args (reference or prim).
+    fn field_type(&mut self) -> Result<JType, ()> {
+        match self.peek() {
+            Some(b'[') => {
+                self.bump();
+                let inner = self.field_type()?;
+                Ok(JType::Array(Box::new(inner)))
+            }
+            Some(b'T') => {
+                self.bump();
+                let start = self.i;
+                while let Some(c) = self.peek() {
+                    if c == b';' {
+                        break;
+                    }
+                    self.i += 1;
+                }
+                let name = std::str::from_utf8(&self.b[start..self.i])
+                    .map_err(|_| ())?
+                    .to_string();
+                self.eat(b';')?;
+                Ok(JType::Var(name))
+            }
+            Some(b'L') => self.class_type(),
+            Some(c) if is_prim_desc(c) => {
+                self.bump();
+                Ok(JType::Prim((c as char).to_string()))
+            }
+            _ => Err(()),
+        }
+    }
+
+    /// `L` PackageSpec ClassName TypeArgs? (`.` Inner TypeArgs?)* `;`
+    fn class_type(&mut self) -> Result<JType, ()> {
+        self.eat(b'L')?;
+        let mut name = String::new();
+        let mut args: Vec<TypeArg> = Vec::new();
+        loop {
+            let start = self.i;
+            while let Some(c) = self.peek() {
+                if matches!(c, b'<' | b';' | b'.') {
+                    break;
+                }
+                self.i += 1;
+            }
+            let seg = std::str::from_utf8(&self.b[start..self.i]).map_err(|_| ())?;
+            if !name.is_empty() {
+                name.push('.'); // inner-class separator; rendered later
+            }
+            name.push_str(seg);
+            // Type arguments for this segment (only the outermost are kept for
+            // rendering; inner args replace any earlier ones, mirroring jadx's
+            // simple inner-class handling).
+            if self.peek() == Some(b'<') {
+                args = self.type_args()?;
+            }
+            match self.peek() {
+                Some(b'.') => {
+                    self.bump();
+                    continue;
+                }
+                Some(b';') => {
+                    self.bump();
+                    break;
+                }
+                None => return Err(()),
+                _ => return Err(()),
+            }
+        }
+        Ok(JType::Class { name, args })
+    }
+
+    fn type_args(&mut self) -> Result<Vec<TypeArg>, ()> {
+        self.eat(b'<')?;
+        let mut out = Vec::new();
+        while self.peek() != Some(b'>') {
+            match self.peek() {
+                None => return Err(()),
+                Some(b'*') => {
+                    self.bump();
+                    out.push(TypeArg::Unbounded);
+                }
+                Some(b'+') => {
+                    self.bump();
+                    out.push(TypeArg::ExtendsWild(self.field_type()?));
+                }
+                Some(b'-') => {
+                    self.bump();
+                    out.push(TypeArg::SuperWild(self.field_type()?));
+                }
+                _ => out.push(TypeArg::Type(self.field_type()?)),
+            }
+        }
+        self.eat(b'>')?;
+        Ok(out)
+    }
+}
+
+fn is_prim_desc(c: u8) -> bool {
+    matches!(
+        c,
+        b'V' | b'Z' | b'B' | b'S' | b'C' | b'I' | b'J' | b'F' | b'D'
+    )
+}
+
+fn prim_to_java(c: &str) -> &'static str {
+    match c {
+        "V" => "void",
+        "Z" => "boolean",
+        "B" => "byte",
+        "S" => "short",
+        "C" => "char",
+        "I" => "int",
+        "J" => "long",
+        "F" => "float",
+        "D" => "double",
+        _ => "int",
+    }
+}
+
+/// Render a parsed `JType` to Java source, routing class names through imports.
+fn render_jtype(t: &JType, imports: &mut Imports) -> String {
+    match t {
+        JType::Prim(c) => prim_to_java(c).to_string(),
+        JType::Var(name) => name.clone(),
+        JType::Array(inner) => format!("{}[]", render_jtype(inner, imports)),
+        JType::Class { name, args } => {
+            // `name` uses `.` for both package and inner-class separators; the
+            // imports manager resolves it as a dotted FQN (inner classes render
+            // with their dotted tail, matching the erased path's simple_name).
+            let dotted = name.replace('/', ".");
+            let base = imports.use_type(&dotted);
+            if args.is_empty() {
+                base
+            } else {
+                let rendered: Vec<String> =
+                    args.iter().map(|a| render_type_arg(a, imports)).collect();
+                format!("{base}<{}>", rendered.join(", "))
+            }
+        }
+    }
+}
+
+fn render_type_arg(a: &TypeArg, imports: &mut Imports) -> String {
+    match a {
+        TypeArg::Type(t) => render_jtype(t, imports),
+        TypeArg::ExtendsWild(t) => format!("? extends {}", render_jtype(t, imports)),
+        TypeArg::SuperWild(t) => format!("? super {}", render_jtype(t, imports)),
+        TypeArg::Unbounded => "?".to_string(),
+    }
+}
+
+/// Render a formal type-parameter list `<T extends X, U>` (empty -> "").
+fn render_type_params(params: &[TypeParam], imports: &mut Imports) -> String {
+    if params.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = params
+        .iter()
+        .map(|p| {
+            // A leading bound of `java.lang.Object` is the implicit default and
+            // is omitted, matching idiomatic Java output.
+            let bounds: Vec<String> = p
+                .bounds
+                .iter()
+                .map(|b| render_jtype(b, imports))
+                .filter(|b| b != "java.lang.Object" && b != "Object")
+                .collect();
+            if bounds.is_empty() {
+                p.name.clone()
+            } else {
+                format!("{} extends {}", p.name, bounds.join(" & "))
+            }
+        })
+        .collect();
+    format!("<{}>", parts.join(", "))
+}
+
+/// Generic class-header pieces parsed from a class signature.
+struct ClassHeaderGenerics {
+    type_params: String,
+    superclass: Option<String>,
+    interfaces: Vec<String>,
+}
+
+/// Parse a class signature into rendered header pieces. Returns `None` on any
+/// parse error so the caller falls back to erased rendering.
+fn parse_class_header(sig: &str, imports: &mut Imports) -> Option<ClassHeaderGenerics> {
+    let mut p = SigParser::new(sig);
+    let params = p.formal_type_params().ok()?;
+    // SuperclassSignature.
+    let superclass = match p.field_type() {
+        Ok(t) => Some(render_jtype(&t, imports)),
+        Err(_) => return None,
+    };
+    // SuperinterfaceSignature* until end.
+    let mut interfaces = Vec::new();
+    while p.peek().is_some() {
+        match p.field_type() {
+            Ok(t) => interfaces.push(render_jtype(&t, imports)),
+            Err(_) => return None,
+        }
+    }
+    Some(ClassHeaderGenerics {
+        type_params: render_type_params(&params, imports),
+        superclass,
+        interfaces,
+    })
+}
+
+/// Generic method pieces parsed from a method signature.
+struct MethodGenerics {
+    type_params: String,
+    params: Vec<String>,
+    return_type: String,
+}
+
+/// Parse a method signature `<...>(args)ret` into rendered pieces.
+fn parse_method_generics(sig: &str, imports: &mut Imports) -> Option<MethodGenerics> {
+    let mut p = SigParser::new(sig);
+    let tparams = p.formal_type_params().ok()?;
+    p.eat(b'(').ok()?;
+    let mut params = Vec::new();
+    while p.peek() != Some(b')') {
+        if p.peek().is_none() {
+            return None;
+        }
+        match p.field_type() {
+            Ok(t) => params.push(render_jtype(&t, imports)),
+            Err(_) => return None,
+        }
+    }
+    p.eat(b')').ok()?;
+    let ret = p.field_type().ok()?;
+    Some(MethodGenerics {
+        type_params: render_type_params(&tparams, imports),
+        params,
+        return_type: render_jtype(&ret, imports),
+    })
+}
+
+/// Parse a single field type signature, rendered to Java. `None` on error.
+fn parse_field_type(sig: &str, imports: &mut Imports) -> Option<String> {
+    let mut p = SigParser::new(sig);
+    let t = p.field_type().ok()?;
+    // Trailing junk means the signature was not a clean field type; bail.
+    if p.peek().is_some() {
+        return None;
+    }
+    Some(render_jtype(&t, imports))
 }

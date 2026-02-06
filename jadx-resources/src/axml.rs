@@ -67,6 +67,40 @@ pub struct AxmlDocument {
     pub strings: StringPool,
     pub root: Option<XmlElement>,
     pub namespaces: Vec<(String, String)>,
+    /// `RES_XML_RESOURCE_MAP` contents: one resource id per string-pool entry,
+    /// indexed in parallel with `strings`. Used to recover an attribute name
+    /// when its name string is empty but its index maps to a known framework
+    /// `android:` attribute resource id.
+    pub resource_map: Vec<u32>,
+}
+
+/// Map a framework `android:` attribute resource id to its attribute name, for
+/// the small set of attributes that matter to manifest reconstruction. This is
+/// best-effort: ids not listed fall back to the binary string-pool name.
+pub fn android_attr_name(res_id: u32) -> Option<&'static str> {
+    match res_id {
+        0x0101_0000 => Some("theme"),
+        0x0101_0001 => Some("label"),
+        0x0101_0002 => Some("icon"),
+        0x0101_0003 => Some("name"),
+        0x0101_000e => Some("enabled"),
+        0x0101_000f => Some("debuggable"),
+        0x0101_0010 => Some("exported"),
+        0x0101_0011 => Some("process"),
+        0x0101_0018 => Some("authorities"),
+        0x0101_001e => Some("permission"),
+        0x0101_0020 => Some("minSdkVersion"),
+        0x0101_021b => Some("versionCode"),
+        0x0101_021c => Some("versionName"),
+        0x0101_0270 => Some("targetActivity"),
+        0x0101_0271 => Some("targetSdkVersion"),
+        0x0101_0288 => Some("required"),
+        0x0101_028a => Some("glEsVersion"),
+        0x0101_0291 => Some("allowBackup"),
+        0x0102_0094 => Some("networkSecurityConfig"),
+        0x0102_004f => Some("usesCleartextTraffic"),
+        _ => None,
+    }
 }
 
 impl AxmlDocument {
@@ -87,6 +121,7 @@ impl AxmlDocument {
         let mut ns_stack: Vec<(String, String)> = Vec::new();
         let mut elem_stack: Vec<XmlElement> = Vec::new();
         let mut root: Option<XmlElement> = None;
+        let mut resource_map: Vec<u32> = Vec::new();
 
         let mut pos = top.start + top.header_size as usize;
         while pos + 8 <= data.len() {
@@ -100,7 +135,22 @@ impl AxmlDocument {
                 RES_STRING_POOL_TYPE => {
                     strings = StringPool::parse(data, ch.start)?;
                 }
-                RES_XML_RESOURCE_MAP => { /* attribute resource ids — not needed */ }
+                RES_XML_RESOURCE_MAP => {
+                    // Body is a flat array of u32 resource ids, one per string
+                    // in the pool (parallel index). Length is derived from the
+                    // chunk size after the header.
+                    let map_bytes = (ch.chunk_size as usize).saturating_sub(ch.header_size as usize);
+                    let count = map_bytes / 4;
+                    let mut mb = Buf::at(data, body);
+                    resource_map.clear();
+                    resource_map.reserve(count);
+                    for _ in 0..count {
+                        match mb.u32() {
+                            Ok(id) => resource_map.push(id),
+                            Err(_) => break,
+                        }
+                    }
+                }
                 RES_XML_START_NAMESPACE => {
                     let mut nb = Buf::at(data, body);
                     let prefix = strings.get_or(nb.u32()?, "");
@@ -112,7 +162,7 @@ impl AxmlDocument {
                     ns_stack.pop();
                 }
                 RES_XML_START_ELEMENT => {
-                    let elem = parse_start_element(data, body, &strings, &ns_stack)?;
+                    let elem = parse_start_element(data, body, &strings, &ns_stack, &resource_map)?;
                     elem_stack.push(elem);
                 }
                 RES_XML_END_ELEMENT => {
@@ -140,6 +190,7 @@ impl AxmlDocument {
             strings,
             root,
             namespaces: doc_namespaces,
+            resource_map,
         })
     }
 
@@ -158,6 +209,7 @@ fn parse_start_element(
     body: usize,
     strings: &StringPool,
     ns_stack: &[(String, String)],
+    resource_map: &[u32],
 ) -> Result<XmlElement> {
     let mut b = Buf::at(data, body);
     let _ns = b.u32()?;
@@ -172,7 +224,8 @@ fn parse_start_element(
     let mut attrs = Vec::with_capacity(attr_count);
     for _ in 0..attr_count {
         let ns_uri = strings.get(b.u32()?).map(|s| s.to_string());
-        let aname = strings.get_or(b.u32()?, "");
+        let name_idx = b.u32()?;
+        let aname = attr_name(name_idx, strings, resource_map);
         let raw_value = b.u32()?;
         let _size = b.u16()?;
         let _res0 = b.u8()?;
@@ -196,6 +249,25 @@ fn parse_start_element(
         attrs,
         children: Vec::new(),
     })
+}
+
+/// Resolve an attribute name from its string-pool index, falling back to the
+/// resource map when the pooled name is empty. Many obfuscated/optimized APKs
+/// leave attribute name strings blank and rely solely on the parallel
+/// `RES_XML_RESOURCE_MAP` entry to identify the `android:` attribute.
+fn attr_name(name_idx: u32, strings: &StringPool, resource_map: &[u32]) -> String {
+    let pooled = strings.get_or(name_idx, "");
+    if !pooled.is_empty() {
+        return pooled;
+    }
+    if name_idx != 0xffff_ffff {
+        if let Some(&res_id) = resource_map.get(name_idx as usize) {
+            if let Some(known) = android_attr_name(res_id) {
+                return known.to_string();
+            }
+        }
+    }
+    pooled
 }
 
 fn prefix_for(uri: &str, ns_stack: &[(String, String)]) -> String {

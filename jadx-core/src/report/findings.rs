@@ -121,6 +121,84 @@ fn rules() -> Vec<Rule> {
         rule("BASIC_AUTH_URL", "secret", Warning, "Credentials in URL", r"https?://[^:@/\s]+:[^@/\s]+@"),
         rule("PRIVATE_KEY_JSON", "secret", Error, "Embedded private key (JSON)", r#""private_key"\s*:\s*"-----BEGIN"#),
 
+        // ---- additional provider token shapes (extends bank to >=80 distinct patterns) ----
+        rule("GITLAB_PAT", "secret", Error, "GitLab personal access token", r"glpat-[0-9A-Za-z_\-]{20}"),
+        rule("GITLAB_PIPELINE", "secret", Error, "GitLab pipeline trigger token", r"glptt-[0-9a-f]{40}"),
+        rule("GITLAB_RUNNER", "secret", Warning, "GitLab runner registration token", r"GR1348941[0-9A-Za-z_\-]{20}"),
+        rule("STRIPE_TEST_SECRET", "secret", Warning, "Stripe test secret key", r"sk_test_[0-9a-zA-Z]{24,}"),
+        rule("STRIPE_TEST_PUB", "secret", Note, "Stripe test publishable key", r"pk_test_[0-9a-zA-Z]{24,}"),
+        rule("STRIPE_RESTRICTED_TEST", "secret", Warning, "Stripe restricted test key", r"rk_test_[0-9a-zA-Z]{24,}"),
+        rule("STRIPE_WEBHOOK_SECRET", "secret", Error, "Stripe webhook signing secret", r"whsec_[0-9A-Za-z]{32,}"),
+        rule("FIREBASE_FCM_SERVER", "secret", Error, "Firebase Cloud Messaging server key", r"AAAA[A-Za-z0-9_\-]{7}:[A-Za-z0-9_\-]{140,}"),
+        rule("GOOGLE_OAUTH_REFRESH", "secret", Error, "Google OAuth refresh token", r"1/[0-9A-Za-z_\-]{43}|1/[0-9A-Za-z_\-]{64}"),
+        rule("GOOGLE_CAPTCHA", "secret", Note, "Google reCAPTCHA key", r"6L[0-9A-Za-z_\-]{38}"),
+        rule("SENTRY_DSN", "secret", Warning, "Sentry DSN", r"https://[0-9a-f]{32}@[a-z0-9.\-]*sentry\.io/[0-9]+"),
+        rule("DATADOG_KEY", "secret", Error, "Datadog API key", r#"(?i)datadog.{0,20}['\"][0-9a-f]{32}['\"]"#),
+        rule("NEW_RELIC_KEY", "secret", Error, "New Relic license/API key", r"NRAK-[0-9A-Z]{27}"),
+        rule("NEW_RELIC_USER_KEY", "secret", Error, "New Relic user API key", r"NRJS-[0-9a-f]{19}"),
+        rule("PAGERDUTY_KEY", "secret", Warning, "PagerDuty API token", r#"(?i)pagerduty.{0,20}['\"][0-9a-zA-Z+_\-]{20}['\"]"#),
+        rule("ALGOLIA_KEY", "secret", Warning, "Algolia admin API key", r#"(?i)algolia.{0,20}['\"][0-9a-f]{32}['\"]"#),
+        rule("CLOUDINARY_URL", "secret", Error, "Cloudinary credentials URL", r"cloudinary://[0-9]+:[0-9A-Za-z_\-]+@[0-9A-Za-z_\-]+"),
+        rule("DIGITALOCEAN_OAUTH", "secret", Error, "DigitalOcean OAuth token", r"doo_v1_[0-9a-f]{64}"),
+        rule("DIGITALOCEAN_REFRESH", "secret", Error, "DigitalOcean refresh token", r"dor_v1_[0-9a-f]{64}"),
+        rule("DROPBOX_TOKEN", "secret", Error, "Dropbox short-lived access token", r"sl\.[A-Za-z0-9_\-]{130,}"),
+        rule("DROPBOX_LONG", "secret", Warning, "Dropbox long-lived token", r#"(?i)dropbox.{0,20}['\"][0-9A-Za-z_\-]{43,}['\"]"#),
+        rule("ASANA_TOKEN", "secret", Warning, "Asana personal access token", r"[0-9]/[0-9]{16}:[0-9A-Za-z]{32}"),
+        rule("ATLASSIAN_TOKEN", "secret", Error, "Atlassian/Jira API token", r"ATATT3[A-Za-z0-9_\-=]{180,}"),
+        rule("TELEGRAM_BOT", "secret", Error, "Telegram bot token", r"[0-9]{8,10}:AA[0-9A-Za-z_\-]{33}"),
+        rule("TWILIO_API_KEY", "secret", Error, "Twilio API key SID", r"SK[0-9a-f]{32}"),
+        rule("SQUARE_PROD_ACCESS", "secret", Error, "Square production access token", r"EAAA[0-9A-Za-z_\-]{59}"),
+        rule("SHOPIFY_PRIVATE", "secret", Error, "Shopify private app password", r"shpss_[0-9a-fA-F]{32}"),
+        rule("SHOPIFY_CUSTOM", "secret", Error, "Shopify custom app token", r"shpca_[0-9a-fA-F]{32}"),
+        rule("SHOPIFY_SHARED", "secret", Error, "Shopify shared secret", r"shpat_[0-9a-fA-F]{32}"),
+        rule("RAZORPAY_LIVE", "secret", Error, "Razorpay live key id", r"rzp_live_[0-9A-Za-z]{14,}"),
+        rule("RAZORPAY_TEST", "secret", Warning, "Razorpay test key id", r"rzp_test_[0-9A-Za-z]{14,}"),
+        rule("OKTA_TOKEN", "secret", Warning, "Okta API token", r#"(?i)okta.{0,20}['\"]00[0-9A-Za-z_\-]{40}['\"]"#),
+        rule("AUTH0_SECRET", "secret", Warning, "Auth0 client secret", r#"(?i)auth0.{0,20}['\"][0-9A-Za-z_\-]{40,}['\"]"#),
+        rule("TWITCH_TOKEN", "secret", Warning, "Twitch OAuth token", r#"(?i)twitch.{0,20}['\"][0-9a-z]{30}['\"]"#),
+        rule("SPOTIFY_TOKEN", "secret", Note, "Spotify access token", r#"(?i)spotify.{0,20}['\"]BQ[0-9A-Za-z_\-]{80,}['\"]"#),
+        rule("MS_TEAMS_WEBHOOK", "secret", Warning, "Microsoft Teams webhook", r"https://[a-z0-9.]*webhook\.office\.com/webhookb2/[0-9A-Za-z@/\-]+"),
+        rule("LINKEDIN_TOKEN", "secret", Warning, "LinkedIn OAuth access token", r"AQ[A-Za-z0-9_\-]{370,}"),
+        rule("DISCORD_TOKEN_MFA", "secret", Warning, "Discord MFA bot token", r"mfa\.[A-Za-z0-9_\-]{84}"),
+        rule("GENERIC_SECRET_ASSIGN", "secret", Note, "Generic secret literal assignment", r#"(?i)(secret|token|passwd|pwd|apikey)['\"]?\s*[:=]\s*['\"][^'\"]{12,}['\"]"#),
+        rule("BEARER_HEADER", "secret", Note, "Hardcoded Bearer authorization header", r#"(?i)authorization['\"]?\s*[:=]\s*['\"]?Bearer\s+[0-9A-Za-z._\-]{20,}"#),
+        rule("BASIC_AUTH_HEADER", "secret", Note, "Hardcoded Basic authorization header", r#"(?i)authorization['\"]?\s*[:=]\s*['\"]?Basic\s+[0-9A-Za-z+/=]{16,}"#),
+        rule("PGP_PRIVATE_KEY", "secret", Error, "PGP private key block", r"-----BEGIN PGP PRIVATE KEY BLOCK-----"),
+        rule("RSA_PRIVATE_KEY", "secret", Error, "RSA private key block", r"-----BEGIN RSA PRIVATE KEY-----"),
+        rule("EC_PRIVATE_KEY", "secret", Error, "EC private key block", r"-----BEGIN EC PRIVATE KEY-----"),
+        rule("DSA_PRIVATE_KEY", "secret", Error, "DSA private key block", r"-----BEGIN DSA PRIVATE KEY-----"),
+        rule("PKCS8_PRIVATE_KEY", "secret", Error, "PKCS#8 private key block", r"-----BEGIN PRIVATE KEY-----"),
+        rule("ENCRYPTED_PRIVATE_KEY", "secret", Error, "Encrypted private key block", r"-----BEGIN ENCRYPTED PRIVATE KEY-----"),
+        rule("PUTTY_PRIVATE_KEY", "secret", Error, "PuTTY private key", r"PuTTY-User-Key-File-[0-9]"),
+        rule("AGE_SECRET_KEY", "secret", Error, "age encryption secret key", r"AGE-SECRET-KEY-1[0-9A-Z]{58}"),
+        rule("GRAFANA_TOKEN", "secret", Warning, "Grafana service account token", r"glsa_[0-9A-Za-z]{32}_[0-9a-f]{8}"),
+        rule("GRAFANA_CLOUD", "secret", Warning, "Grafana cloud API token", r"glc_[0-9A-Za-z_\-=]{40,}"),
+        rule("HASHICORP_VAULT", "secret", Error, "HashiCorp Vault service token", r"hvs\.[0-9A-Za-z_\-]{90,}"),
+        rule("HASHICORP_BATCH", "secret", Error, "HashiCorp Vault batch token", r"hvb\.[0-9A-Za-z_\-]{90,}"),
+        rule("DOPPLER_TOKEN", "secret", Warning, "Doppler API token", r"dp\.(pt|ct|st|sa|scim|audit)\.[0-9A-Za-z]{40,}"),
+        rule("FLY_API_TOKEN", "secret", Warning, "Fly.io API token", r"fly[A-Za-z0-9_\-]{0,4}_[0-9A-Za-z_\-]{40,}"),
+        rule("LINEAR_API_KEY", "secret", Warning, "Linear API key", r"lin_api_[0-9A-Za-z]{40}"),
+        rule("NOTION_TOKEN", "secret", Warning, "Notion integration token", r"secret_[0-9A-Za-z]{43}"),
+        rule("POSTMAN_KEY", "secret", Warning, "Postman API key", r"PMAK-[0-9a-f]{24}-[0-9a-f]{34}"),
+        rule("PLANETSCALE_TOKEN", "secret", Warning, "PlanetScale OAuth token", r"pscale_oauth_[0-9A-Za-z_\.\-]{32,}"),
+        rule("PLANETSCALE_PASSWORD", "secret", Error, "PlanetScale password", r"pscale_pw_[0-9A-Za-z_\.\-]{32,}"),
+        rule("SUPABASE_SERVICE", "secret", Error, "Supabase service role JWT", r"eyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]*role[A-Za-z0-9_\-]*\.[A-Za-z0-9_\-]+"),
+        rule("MAPBOX_SECRET", "secret", Warning, "Mapbox secret token", r"sk\.eyJ[0-9A-Za-z_\-]+\.[0-9A-Za-z_\-]+"),
+        rule("FINICITY_KEY", "secret", Warning, "Finicity API key", r#"(?i)finicity.{0,20}['\"][0-9a-f]{32}['\"]"#),
+        rule("INTERCOM_TOKEN", "secret", Warning, "Intercom access token", r#"(?i)intercom.{0,20}['\"]dG9r[0-9A-Za-z=_\-]{50,}['\"]"#),
+        rule("AMPLITUDE_KEY", "secret", Note, "Amplitude API key", r#"(?i)amplitude.{0,20}['\"][0-9a-f]{32}['\"]"#),
+        rule("SEGMENT_KEY", "secret", Note, "Segment write key", r#"(?i)segment.{0,20}['\"][0-9A-Za-z]{32}['\"]"#),
+        rule("AIRTABLE_KEY", "secret", Warning, "Airtable API key", r"key[0-9A-Za-z]{14}|pat[0-9A-Za-z]{14}\.[0-9a-f]{64}"),
+        rule("CLOUDFLARE_TOKEN", "secret", Warning, "Cloudflare API token", r#"(?i)cloudflare.{0,20}['\"][0-9A-Za-z_\-]{40}['\"]"#),
+        rule("FASTLY_TOKEN", "secret", Warning, "Fastly API token", r#"(?i)fastly.{0,20}['\"][0-9A-Za-z_\-]{32}['\"]"#),
+        rule("CIRCLECI_TOKEN", "secret", Warning, "CircleCI personal token", r#"(?i)circleci.{0,20}['\"][0-9a-f]{40}['\"]"#),
+        rule("TYPEFORM_TOKEN", "secret", Note, "Typeform personal token", r"tfp_[0-9A-Za-z_\-]{40,}"),
+        rule("CLOJARS_TOKEN", "secret", Warning, "Clojars deploy token", r"CLOJARS_[0-9A-Za-z]{60}"),
+        rule("DOCKER_HUB_PAT", "secret", Warning, "Docker Hub personal access token", r"dckr_pat_[0-9A-Za-z_\-]{20,}"),
+        rule("RUBYGEMS_KEY", "secret", Warning, "RubyGems API key", r"rubygems_[0-9a-f]{48}"),
+        rule("FACEBOOK_OAUTH", "secret", Warning, "Facebook OAuth app token", r"[0-9]{13,17}\|[0-9A-Za-z_\-]{27}"),
+        rule("YANDEX_TOKEN", "secret", Warning, "Yandex API key", r"AQVN[A-Za-z0-9_\-]{35,38}"),
+
         // ---- insecure crypto ----
         rule("CRYPTO_DES", "crypto", Warning, "Weak cipher: DES", r#"getInstance\(\s*"DES"#),
         rule("CRYPTO_DESEDE", "crypto", Warning, "Weak cipher: 3DES", r#"getInstance\(\s*"DESede"#),
@@ -153,6 +231,7 @@ fn rules() -> Vec<Rule> {
         rule("WORLD_READABLE", "storage", Warning, "MODE_WORLD_READABLE", r"MODE_WORLD_READABLE"),
         rule("WORLD_WRITABLE", "storage", Error, "MODE_WORLD_WRITABLE", r"MODE_WORLD_WRITABLE"),
         rule("EXTERNAL_STORAGE", "storage", Note, "External storage path", r"getExternalStorage(Directory|PublicDirectory)"),
+        rule("CONTENT_RESOLVER_OPEN", "ipc", Warning, "ContentResolver.openInputStream on a possibly user-controlled URI", r"getContentResolver\s*\(\s*\)\s*\.\s*openInputStream\s*\(|ContentResolver[^;]*\.openInputStream\s*\("),
 
         // ---- TLS / hostname verification ----
         rule("TRUST_ALL", "tls", Error, "Trust-all TrustManager", r"checkServerTrusted|X509TrustManager"),
@@ -443,5 +522,47 @@ mod once_cell_like {
             static RE: OnceLock<Regex> = OnceLock::new();
             RE.get_or_init(|| Regex::new(r#""([^"\\]{20,})""#).unwrap())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fires(rule_id: &str, source: &str) -> bool {
+        scan_sources(&[("Sample.java".to_string(), source.to_string())])
+            .iter()
+            .any(|f| f.rule_id == rule_id)
+    }
+
+    #[test]
+    fn rule_bank_compiles_and_has_full_set() {
+        // Every spec must compile (no `rule(..)` returned None).
+        let compiled = rules().len();
+        // The full bank covers secrets + crypto + webview + exec/native + ipc/storage + tls.
+        assert!(compiled >= 80, "expected >=80 compiled rules, got {compiled}");
+        // The secret bank alone must be >=80 distinct provider patterns.
+        let secrets = rules().iter().filter(|r| r.category == "secret").count();
+        assert!(secrets >= 80, "expected >=80 secret patterns, got {secrets}");
+    }
+
+    #[test]
+    fn content_resolver_open_input_stream_fires() {
+        let src = "InputStream in = getContentResolver().openInputStream(uri);";
+        assert!(fires("CONTENT_RESOLVER_OPEN", src));
+    }
+
+    #[test]
+    fn new_secret_patterns_fire() {
+        assert!(fires("GITLAB_PAT", "String t = \"glpat-ABCDEFGHIJ1234567890\";"));
+        assert!(fires("STRIPE_WEBHOOK_SECRET", "whsec_0123456789abcdef0123456789abcdef"));
+        assert!(fires(
+            "TELEGRAM_BOT",
+            "110201543:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawXY"
+        ));
+        assert!(fires(
+            "PKCS8_PRIVATE_KEY",
+            "-----BEGIN PRIVATE KEY-----MIIEv..."
+        ));
     }
 }
