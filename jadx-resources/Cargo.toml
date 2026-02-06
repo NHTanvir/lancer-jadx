@@ -1,0 +1,15 @@
+[package]
+name = "jadx-resources"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "AXML (binary XML) decoder + ARSC (resources.arsc) decoder + manifest reconstructor (part of lancer-jadx)"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+byteorder.workspace = true
+serde.workspace = true

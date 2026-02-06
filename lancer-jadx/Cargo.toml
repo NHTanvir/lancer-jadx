@@ -1,0 +1,33 @@
+[package]
+name = "lancer-jadx"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rust clone of jadx with a native GUI — part of the Lancer bug bounty toolkit"
+
+[[bin]]
+name = "lancer-jadx"
+path = "src/main.rs"
+
+[features]
+default = ["gui"]
+# The GUI pulls a large dependency tree (eframe/egui/winit). Disable with
+# `--no-default-features` for fast headless / CI checks.
+gui = ["dep:eframe", "dep:egui", "dep:rfd"]
+
+[dependencies]
+jadx-core.workspace = true
+jadx-cli.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+eframe = { version = "0.27", optional = true, default-features = true }
+egui = { version = "0.27", optional = true }
+rfd = { version = "0.14", optional = true }
