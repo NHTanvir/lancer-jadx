@@ -14,6 +14,8 @@ pub struct Renamer {
     min: usize,
     max: usize,
     enabled: bool,
+    /// Honour `--deobf-use-sourcename`: prefer DEX `source_file` basenames.
+    use_sourcename: bool,
 }
 
 impl Renamer {
@@ -24,6 +26,7 @@ impl Renamer {
             min: args.deobf_min as usize,
             max: args.deobf_max as usize,
             enabled: args.deobf && args.rename_flags != RenameFlags::None,
+            use_sourcename: args.deobf_use_sourcename,
         }
     }
 
@@ -47,12 +50,21 @@ impl Renamer {
         }
         let mut cls_n = 0usize;
         let mut mem_n = 0usize;
+        // Track new class names already in use so source-name-derived names stay unique.
+        let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
         for dex in dex_files {
             for class in &dex.classes {
                 let cname = jadx_dex::descriptor::simple_name(&dex.class_name(class));
                 if self.is_candidate(&cname) && !self.classes.contains_key(&cname) {
-                    self.classes.insert(cname, format!("C{cls_n:04}Cls"));
+                    let new_name = self
+                        .use_sourcename
+                        .then(|| source_name_for(dex.source_file(class), &cname))
+                        .flatten()
+                        .map(|base| unique_name(&base, &used))
+                        .unwrap_or_else(|| format!("C{cls_n:04}Cls"));
                     cls_n += 1;
+                    used.insert(new_name.clone());
+                    self.classes.insert(cname, new_name);
                 }
                 for f in class.static_fields.iter().chain(class.instance_fields.iter()) {
                     let n = dex.field_entry_ref(f).name;
@@ -113,6 +125,66 @@ impl Renamer {
 fn looks_synthetic(name: &str) -> bool {
     name.contains("$$")
         || (name.len() <= 2 && name.chars().all(|c| c.is_ascii_alphabetic()))
+}
+
+/// Derive a usable simple class name from a DEX `source_file` value.
+///
+/// Returns `None` when the source name is absent, generic (`SourceFile`), or
+/// just echoes the obfuscated short name — in those cases the caller falls back
+/// to the synthetic `Cls` heuristic.
+fn source_name_for(source_file: Option<&str>, obf_name: &str) -> Option<String> {
+    let raw = source_file?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    // Strip directory components and the file extension (e.g. ".java"/".kt").
+    let basename = raw.rsplit(|c| c == '/' || c == '\\').next().unwrap_or(raw);
+    let stem = match basename.rfind('.') {
+        Some(idx) => &basename[..idx],
+        None => basename,
+    };
+    if stem.is_empty() || stem.eq_ignore_ascii_case("SourceFile") || stem == obf_name {
+        return None;
+    }
+    let ident = sanitize_identifier(stem);
+    // Reject names that sanitized down to nothing useful or back to the obf name.
+    if ident.is_empty() || ident == obf_name {
+        None
+    } else {
+        Some(ident)
+    }
+}
+
+/// Sanitize an arbitrary string into a valid Java identifier.
+fn sanitize_identifier(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' || c == '$' {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    // Java identifiers cannot start with a digit.
+    if out.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        out.insert(0, '_');
+    }
+    out
+}
+
+/// Ensure `base` is unique within `used` by appending a numeric suffix.
+fn unique_name(base: &str, used: &std::collections::HashSet<String>) -> String {
+    if !used.contains(base) {
+        return base.to_string();
+    }
+    let mut n = 1usize;
+    loop {
+        let candidate = format!("{base}{n}");
+        if !used.contains(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
 }
 
 enum Token<'a> {

@@ -7,6 +7,7 @@
 //! `jadx-core`.
 
 pub mod access;
+pub mod annotation;
 pub mod code;
 pub mod descriptor;
 pub mod dexfile;
@@ -17,6 +18,7 @@ pub mod ir;
 pub mod opcodes;
 pub mod reader;
 
+pub use annotation::{Annotation, EncodedValue};
 pub use code::{CatchHandler, CodeItem, DebugInfo, TryItem};
 pub use dexfile::{DexClass, DexFieldEntry, DexFile, DexMethodEntry, FieldRef, MethodRef};
 pub use error::{DexError, Result};

@@ -32,13 +32,25 @@ impl IntentFilter {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct UsesFeature {
+    /// `android:name` of the feature, when named (hardware/software features).
+    pub name: Option<String>,
+    /// `android:glEsVersion`, when this is an OpenGL ES version requirement.
+    pub gl_es_version: Option<String>,
+    /// `android:required` — defaults to `true` per the platform when absent.
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct Component {
-    /// `activity` / `service` / `receiver` / `provider`.
+    /// `activity` / `activity-alias` / `service` / `receiver` / `provider`.
     pub kind: String,
     pub name: String,
     pub exported: Option<bool>,
     pub permission: Option<String>,
     pub intent_filters: Vec<IntentFilter>,
+    /// `android:targetActivity` for an `activity-alias`; `None` otherwise.
+    pub target_activity: Option<String>,
 }
 
 impl Component {
@@ -65,6 +77,8 @@ pub struct ManifestInfo {
     pub allow_backup: Option<bool>,
     pub uses_cleartext_traffic: Option<bool>,
     pub network_security_config: Option<String>,
+    /// `<uses-feature>` declarations (hardware/software/GL ES requirements).
+    pub uses_features: Vec<UsesFeature>,
 }
 
 impl ManifestInfo {
@@ -102,6 +116,19 @@ impl ManifestInfo {
             }
         }
 
+        // uses-feature (hardware/software/GL ES requirements)
+        let mut features = Vec::new();
+        root.find_all("uses-feature", &mut features);
+        for f in features {
+            info.uses_features.push(UsesFeature {
+                name: f.attr("name").map(str::to_string),
+                gl_es_version: f.attr("glEsVersion").map(str::to_string),
+                // Per the platform default, a feature is required unless
+                // android:required="false" is set explicitly.
+                required: f.attr("required").map(parse_bool).unwrap_or(true),
+            });
+        }
+
         // application flags
         let mut apps = Vec::new();
         root.find_all("application", &mut apps);
@@ -126,6 +153,33 @@ impl ManifestInfo {
     pub fn exported_components(&self) -> impl Iterator<Item = &Component> {
         self.components.iter().filter(|c| c.is_exported())
     }
+
+    /// Required `<uses-feature>` declarations (android:required defaulting true).
+    pub fn required_features(&self) -> impl Iterator<Item = &UsesFeature> {
+        self.uses_features.iter().filter(|f| f.required)
+    }
+
+    /// `activity-alias` components, paired with the activity they target.
+    pub fn activity_aliases(&self) -> impl Iterator<Item = (&Component, &str)> {
+        self.components.iter().filter_map(|c| {
+            if c.kind == "activity-alias" {
+                Some((c, c.target_activity.as_deref().unwrap_or("")))
+            } else {
+                None
+            }
+        })
+    }
+}
+
+impl UsesFeature {
+    /// Best-effort display label: the feature name, else `glEsVersion`.
+    pub fn label(&self) -> String {
+        match (&self.name, &self.gl_es_version) {
+            (Some(n), _) if !n.is_empty() => n.clone(),
+            (_, Some(v)) => format!("glEsVersion={v}"),
+            _ => String::new(),
+        }
+    }
 }
 
 fn parse_component(kind: &str, e: &XmlElement) -> Component {
@@ -135,6 +189,7 @@ fn parse_component(kind: &str, e: &XmlElement) -> Component {
         exported: e.attr("exported").map(parse_bool),
         permission: e.attr("permission").map(str::to_string),
         intent_filters: Vec::new(),
+        target_activity: e.attr("targetActivity").map(str::to_string),
     };
     for child in &e.children {
         if let XmlNode::Element(f) = child {

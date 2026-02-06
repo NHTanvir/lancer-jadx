@@ -52,6 +52,14 @@ pub struct DexClass {
     pub instance_fields: Vec<DexFieldEntry>,
     pub direct_methods: Vec<DexMethodEntry>,
     pub virtual_methods: Vec<DexMethodEntry>,
+    /// Annotations attached to the class itself (filled after pools are built).
+    pub class_annotations: Vec<crate::annotation::Annotation>,
+    /// Field annotations keyed by `field_idx`.
+    pub field_annotations: std::collections::BTreeMap<u32, Vec<crate::annotation::Annotation>>,
+    /// Method annotations keyed by `method_idx`.
+    pub method_annotations: std::collections::BTreeMap<u32, Vec<crate::annotation::Annotation>>,
+    /// Initial values for the static fields, in declaration order.
+    pub static_values: Vec<crate::annotation::EncodedValue>,
 }
 
 /// A fully resolved method reference (class/name/signature in Java terms).
@@ -154,6 +162,9 @@ impl DexFile {
 
         // --- class defs ---
         let mut classes = Vec::with_capacity(header.class_defs_size as usize);
+        // (annotations_off, static_values_off) per class, resolved in a second
+        // pass once the string/type/field/method pools are available.
+        let mut deferred: Vec<(u32, u32)> = Vec::with_capacity(header.class_defs_size as usize);
         for i in 0..header.class_defs_size as usize {
             r.set_pos(header.class_defs_off as usize + i * 32);
             let class_idx = r.u32()?;
@@ -161,9 +172,9 @@ impl DexFile {
             let superclass_idx = r.u32()?;
             let interfaces_off = r.u32()?;
             let source_file_idx = r.u32()?;
-            let _annotations_off = r.u32()?;
+            let annotations_off = r.u32()?;
             let class_data_off = r.u32()?;
-            let _static_values_off = r.u32()?;
+            let static_values_off = r.u32()?;
 
             let interfaces = if interfaces_off != 0 {
                 parse_type_list(&mut r, interfaces_off as usize)?
@@ -178,6 +189,7 @@ impl DexFile {
                     (Vec::new(), Vec::new(), Vec::new(), Vec::new())
                 };
 
+            deferred.push((annotations_off, static_values_off));
             classes.push(DexClass {
                 class_idx,
                 access_flags,
@@ -188,10 +200,14 @@ impl DexFile {
                 instance_fields,
                 direct_methods,
                 virtual_methods,
+                class_annotations: Vec::new(),
+                field_annotations: std::collections::BTreeMap::new(),
+                method_annotations: std::collections::BTreeMap::new(),
+                static_values: Vec::new(),
             });
         }
 
-        Ok(DexFile {
+        let mut dex = DexFile {
             header,
             strings,
             type_ids,
@@ -199,7 +215,43 @@ impl DexFile {
             field_ids,
             method_ids,
             classes,
-        })
+        };
+
+        // Second pass: resolve annotation directories + static values now that
+        // all pools are populated (annotation decoding needs string/type/field
+        // /method resolution). Malformed offsets are skipped, not fatal.
+        dex.fill_annotations(data, &deferred);
+
+        Ok(dex)
+    }
+
+    /// Resolve each class's `annotations_directory_item` and static initial
+    /// values. `deferred[i]` holds `(annotations_off, static_values_off)` for
+    /// `classes[i]`. Errors in one class are isolated and skipped.
+    fn fill_annotations(&mut self, data: &[u8], deferred: &[(u32, u32)]) {
+        for (i, &(annotations_off, static_values_off)) in deferred.iter().enumerate() {
+            let res = crate::annotation::Resolver {
+                strings: &self.strings,
+                type_ids: &self.type_ids,
+                field_ids: &self.field_ids,
+                method_ids: &self.method_ids,
+            };
+            if annotations_off != 0 {
+                if let Ok(dir) = parse_annotations_directory(data, annotations_off as usize, &res) {
+                    let c = &mut self.classes[i];
+                    c.class_annotations = dir.class_annotations;
+                    c.field_annotations = dir.field_annotations;
+                    c.method_annotations = dir.method_annotations;
+                }
+            }
+            if static_values_off != 0 {
+                let mut sr = Reader::new(data);
+                sr.set_pos(static_values_off as usize);
+                if let Ok(values) = crate::annotation::read_encoded_array(&mut sr, &res) {
+                    self.classes[i].static_values = values;
+                }
+            }
+        }
     }
 
     pub fn string(&self, idx: u32) -> &str {
@@ -316,6 +368,70 @@ impl DexFile {
         // when the buffer is available. Here we just surface what was attached.
         code.debug.clone()
     }
+
+    /// The JVM generic signature attached to a class via
+    /// `dalvik.annotation.Signature`, if present (e.g.
+    /// `<T:Ljava/lang/Object;>Ljava/lang/Object;Ljava/util/List<TT;>;`).
+    pub fn class_signature(&self, class: &DexClass) -> Option<String> {
+        signature_of(&class.class_annotations)
+    }
+
+    /// The generic signature for a method (`method_idx`), searched within the
+    /// owning class's method annotation table.
+    pub fn method_signature(&self, class: &DexClass, method_idx: u32) -> Option<String> {
+        class
+            .method_annotations
+            .get(&method_idx)
+            .and_then(|anns| signature_of(anns))
+    }
+
+    /// The generic field-type signature for a field (`field_idx`).
+    pub fn field_signature(&self, class: &DexClass, field_idx: u32) -> Option<String> {
+        class
+            .field_annotations
+            .get(&field_idx)
+            .and_then(|anns| signature_of(anns))
+    }
+
+    /// User-facing annotations from a set: system/synthetic ones
+    /// (`dalvik.annotation.*`, JSR-175 meta types, `Synthetic`) are filtered out.
+    pub fn user_annotations<'a>(
+        &self,
+        anns: &'a [crate::annotation::Annotation],
+    ) -> Vec<&'a crate::annotation::Annotation> {
+        anns.iter().filter(|a| !a.is_system()).collect()
+    }
+}
+
+/// Concatenate the strings inside a `dalvik.annotation.Signature` annotation
+/// (its single `value` element is an array of `String`s).
+fn signature_of(anns: &[crate::annotation::Annotation]) -> Option<String> {
+    use crate::annotation::EncodedValue;
+    let sig = anns
+        .iter()
+        .find(|a| a.type_name == "dalvik.annotation.Signature")?;
+    let value = sig
+        .elements
+        .iter()
+        .find(|(name, _)| name == "value")
+        .map(|(_, v)| v)?;
+    match value {
+        EncodedValue::Array(items) => {
+            let mut out = String::new();
+            for it in items {
+                if let EncodedValue::String(s) = it {
+                    out.push_str(s);
+                }
+            }
+            if out.is_empty() {
+                None
+            } else {
+                Some(out)
+            }
+        }
+        EncodedValue::String(s) => Some(s.clone()),
+        _ => None,
+    }
 }
 
 fn parse_type_list(r: &mut Reader, off: usize) -> Result<Vec<u16>> {
@@ -413,6 +529,109 @@ fn parse_methods(
             access_flags,
             code,
         });
+    }
+    Ok(out)
+}
+
+/// Decoded `annotations_directory_item` for one class.
+struct AnnotationsDirectory {
+    class_annotations: Vec<crate::annotation::Annotation>,
+    field_annotations: std::collections::BTreeMap<u32, Vec<crate::annotation::Annotation>>,
+    method_annotations: std::collections::BTreeMap<u32, Vec<crate::annotation::Annotation>>,
+}
+
+/// Parse an `annotations_directory_item` at the given absolute offset.
+fn parse_annotations_directory(
+    data: &[u8],
+    off: usize,
+    res: &crate::annotation::Resolver,
+) -> Result<AnnotationsDirectory> {
+    let mut r = Reader::new(data);
+    r.set_pos(off);
+    let class_annotations_off = r.u32()?;
+    let fields_size = r.u32()? as usize;
+    let annotated_methods_size = r.u32()? as usize;
+    let annotated_parameters_size = r.u32()? as usize;
+
+    // field_annotation[]: (field_idx, annotations_off)
+    let mut field_entries = Vec::with_capacity(fields_size);
+    for _ in 0..fields_size {
+        let field_idx = r.u32()?;
+        let set_off = r.u32()?;
+        field_entries.push((field_idx, set_off));
+    }
+    // method_annotation[]: (method_idx, annotations_off)
+    let mut method_entries = Vec::with_capacity(annotated_methods_size);
+    for _ in 0..annotated_methods_size {
+        let method_idx = r.u32()?;
+        let set_off = r.u32()?;
+        method_entries.push((method_idx, set_off));
+    }
+    // parameter_annotation[]: (method_idx, annotations_off -> annotation_set_ref_list)
+    // Skipped for source emission (parameter annotations are rarely rendered),
+    // but consumed so the layout stays consistent if extended later.
+    for _ in 0..annotated_parameters_size {
+        let _method_idx = r.u32()?;
+        let _ref_list_off = r.u32()?;
+    }
+
+    let class_annotations = if class_annotations_off != 0 {
+        parse_annotation_set(data, class_annotations_off as usize, res)?
+    } else {
+        Vec::new()
+    };
+
+    let mut field_annotations = std::collections::BTreeMap::new();
+    for (field_idx, set_off) in field_entries {
+        if set_off != 0 {
+            let anns = parse_annotation_set(data, set_off as usize, res)?;
+            if !anns.is_empty() {
+                field_annotations.insert(field_idx, anns);
+            }
+        }
+    }
+
+    let mut method_annotations = std::collections::BTreeMap::new();
+    for (method_idx, set_off) in method_entries {
+        if set_off != 0 {
+            let anns = parse_annotation_set(data, set_off as usize, res)?;
+            if !anns.is_empty() {
+                method_annotations.insert(method_idx, anns);
+            }
+        }
+    }
+
+    Ok(AnnotationsDirectory {
+        class_annotations,
+        field_annotations,
+        method_annotations,
+    })
+}
+
+/// Parse an `annotation_set_item`: `size:u32` then `size` annotation offsets,
+/// each pointing at an `annotation_item` (`visibility:u8`, encoded_annotation).
+fn parse_annotation_set(
+    data: &[u8],
+    off: usize,
+    res: &crate::annotation::Resolver,
+) -> Result<Vec<crate::annotation::Annotation>> {
+    let mut r = Reader::new(data);
+    r.set_pos(off);
+    let size = r.u32()? as usize;
+    let mut item_offs = Vec::with_capacity(size);
+    for _ in 0..size {
+        item_offs.push(r.u32()?);
+    }
+    let mut out = Vec::with_capacity(size);
+    for item_off in item_offs {
+        if item_off == 0 {
+            continue;
+        }
+        let mut ir = Reader::new(data);
+        ir.set_pos(item_off as usize);
+        let _visibility = ir.u8()?;
+        let ann = crate::annotation::read_encoded_annotation(&mut ir, res)?;
+        out.push(ann);
     }
     Ok(out)
 }
