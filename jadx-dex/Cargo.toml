@@ -1,0 +1,16 @@
+[package]
+name = "jadx-dex"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "DEX bytecode parser + DEX -> high-level Java IR + control-flow recovery (part of lancer-jadx)"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+byteorder.workspace = true
+petgraph.workspace = true
+serde.workspace = true

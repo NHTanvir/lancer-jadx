@@ -1,0 +1,24 @@
+[package]
+name = "jadx-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Upstream-compatible jadx CLI surface + lancer subcommands"
+
+[lib]
+name = "jadx_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "jadx"
+path = "src/bin/jadx.rs"
+
+[dependencies]
+jadx-core.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,25 @@
+[package]
+name = "jadx-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Orchestration core for lancer-jadx: input dispatch, codegen, deobf, xref, findings"
+
+[dependencies]
+jadx-dex.workspace = true
+jadx-resources.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+byteorder.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zip.workspace = true
+regex.workspace = true
+aho-corasick.workspace = true
+petgraph.workspace = true
+rayon.workspace = true
+sha1.workspace = true
+sha2.workspace = true
